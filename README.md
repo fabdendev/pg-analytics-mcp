@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io/) server for **PostgreSQL analytics** �
 
 ## What it does
 
-Exposes **26 read-only tools** organised in 6 categories:
+Exposes **24 read-only tools** organised in 6 categories:
 
 ### Schema Discovery
 - **`database_summary`** — high-level overview: schema/table/view/FK/index counts, total size, extensions
@@ -41,8 +41,6 @@ Exposes **26 read-only tools** organised in 6 categories:
 - **`pipeline_fail_summary`** — cross-entity failure summary grouped by entity, stage, or both
 - **`pipeline_fail_details`** — drill into a specific entity's fail table with optional filters
 - **`pipeline_fail_runs`** — analyse which pipeline runs generated the most failures
-- **`ingestion_failures`** — recent records from `pipeline.ingestion_failures` (legacy monolithic table)
-- **`ingestion_failures_summary`** — failures grouped by table + error reason (legacy monolithic table)
 
 ## Quick start
 
