@@ -1,16 +1,44 @@
 # pg-analytics-mcp
 
-An [MCP](https://modelcontextprotocol.io/) server for **PostgreSQL analytics** — gives any MCP client (Claude Code, Cursor, etc.) instant visibility into schema health, row counts, ingestion monitoring, and multi-environment comparison.
+An [MCP](https://modelcontextprotocol.io/) server for **PostgreSQL analytics** — a general-purpose "DBA-lite" toolkit that gives any MCP client (Claude Code, Cursor, etc.) instant visibility into schema structure, data quality, relationships, performance, and multi-environment comparison.
 
 ## What it does
 
-Exposes 7 read-only tools that let you inspect and monitor one or more PostgreSQL databases:
+Exposes **22 read-only tools** organised in 6 categories:
 
-- **Schema scanning** — row counts for every table, grouped by schema
-- **Table health** — row count, last `inserted_at`/`updated_at` for a specific table
-- **Ingestion monitoring** — recent failures and failure summaries from a `pipeline.ingestion_failures` table
-- **Multi-env comparison** — compare row counts across DEV / STG / PROD
-- **Empty table detection** — quickly find tables with 0 rows
+### Schema Discovery
+- **`database_summary`** — high-level overview: schema/table/view/FK/index counts, total size, extensions
+- **`scan_schemas`** — row counts for every table, grouped by schema
+- **`describe_table`** — column details: name, type, nullable, default, position
+- **`table_sizes`** — disk usage (data + indexes + toast) per table, ordered by size
+- **`find_tables`** — search tables by name pattern (ILIKE)
+- **`find_columns`** — find tables that have a column matching a pattern
+- **`list_empty_tables`** — quickly find tables with 0 rows
+- **`list_environments`** — list configured environments
+
+### Data Exploration
+- **`recent_rows`** — peek at the most recent rows (auto-detects timestamp/PK ordering)
+- **`column_value_counts`** — distinct values and frequencies for a column
+- **`column_stats`** — min, max, avg, null count, distinct count for a column
+
+### Relationships
+- **`list_constraints`** — all constraints (PK, unique, check, FK) for a table
+- **`foreign_keys`** — bidirectional FK relationships (incoming + outgoing)
+- **`compare_envs`** — compare row counts across DEV / STG / PROD
+
+### Performance
+- **`index_usage`** — index scan stats and unused index detection
+- **`slow_query_candidates`** — tables with high sequential scan counts (missing index candidates)
+- **`bloat_estimate`** — tables with dead tuples that may need VACUUM
+
+### Data Quality
+- **`table_health`** — row count + last inserted_at/updated_at for a table
+- **`null_report`** — null percentage for every column in a table
+- **`duplicate_check`** — find duplicate rows based on a set of columns
+
+### Legacy (pipeline-specific)
+- **`ingestion_failures`** — recent records from `pipeline.ingestion_failures`
+- **`ingestion_failures_summary`** — failures grouped by table + error reason
 
 ## Quick start
 
@@ -92,29 +120,18 @@ Add to your Claude Code MCP settings (`~/.claude/settings.json` or `.mcp.json`):
 }
 ```
 
-## Tools
+## Security
 
-| Tool | Description |
-|------|-------------|
-| `scan_schemas` | Row counts for all tables, grouped by schema |
-| `table_health` | Row count + last `inserted_at`/`updated_at` for a specific table |
-| `ingestion_failures` | Recent records from `pipeline.ingestion_failures` (filterable by asset) |
-| `ingestion_failures_summary` | Failures grouped by table + error reason with counts |
-| `compare_envs` | Compare row counts for a table across all configured environments |
-| `list_empty_tables` | All tables with 0 rows in a given environment |
-| `list_environments` | List which environments are configured |
+All tools are **read-only**. No data is ever modified. Additional safeguards:
 
-All tools are **read-only**. No data is ever modified.
-
-## How it works
-
-The server connects to each configured PostgreSQL instance using `psycopg2` and runs read-only queries against `information_schema` and your application tables. Internal schemas (TimescaleDB, `pg_catalog`, `information_schema`, `public`) are filtered out by default.
-
-The `ingestion_failures` and `ingestion_failures_summary` tools expect a `pipeline.ingestion_failures` table — if it doesn't exist in your database, they return a clear error message instead of failing.
+- **Identifier validation** — all user-provided schema/table/column names are validated against `^[a-zA-Z_][a-zA-Z0-9_]*$` and quoted
+- **Row limits** — row-level queries capped at 100, aggregation queries at 200
+- **Statement timeout** — potentially expensive queries (null_report, column_stats, duplicate_check, column_value_counts) use a 30s timeout
+- **Direction validation** — order_dir restricted to ASC/DESC only
 
 ## Multi-environment support
 
-Configure up to 3 environments (DEV, STG, PROD). The first configured environment becomes the default. Use `compare_envs` to quickly spot row count differences across environments — useful for verifying that ETL pipelines are running consistently.
+Configure up to 3 environments (DEV, STG, PROD). The first configured environment becomes the default. Use `compare_envs` to quickly spot row count differences across environments.
 
 ## Development
 
