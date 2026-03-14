@@ -175,11 +175,14 @@ def table_sizes(
     env = resolve_env(env)
     limit = _clamp_agg(limit)
 
-    where_parts = ["schemaname NOT LIKE 'pg_temp%%'"]
+    where_parts = [
+        "n.nspname NOT LIKE 'pg_temp%%'",
+        "n.nspname NOT LIKE 'pg_toast%%'",
+    ]
     params: list = []
     if schema:
         safe_ident(schema)
-        where_parts.append("schemaname = %s")
+        where_parts.append("n.nspname = %s")
         params.append(schema)
 
     where = "WHERE " + " AND ".join(where_parts)
@@ -187,16 +190,18 @@ def table_sizes(
     return query(
         env,
         f"""
-        SELECT schemaname AS schema,
-               relname AS table,
-               pg_size_pretty(pg_total_relation_size(schemaname || '.' || relname)) AS total_size,
-               pg_total_relation_size(schemaname || '.' || relname) AS total_size_bytes,
-               pg_size_pretty(pg_relation_size(schemaname || '.' || relname)) AS data_size,
-               pg_size_pretty(pg_indexes_size((schemaname || '.' || relname)::regclass)) AS index_size,
-               n_live_tup AS estimated_rows
-        FROM pg_stat_user_tables
+        SELECT n.nspname AS schema,
+               c.relname AS table,
+               pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
+               pg_total_relation_size(c.oid) AS total_size_bytes,
+               pg_size_pretty(pg_relation_size(c.oid)) AS data_size,
+               pg_size_pretty(pg_indexes_size(c.oid)) AS index_size,
+               c.reltuples::bigint AS estimated_rows
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
         {where}
-        ORDER BY pg_total_relation_size(schemaname || '.' || relname) DESC
+          AND c.relkind = 'r'
+        ORDER BY pg_total_relation_size(c.oid) DESC
         LIMIT %s
     """,
         params,
