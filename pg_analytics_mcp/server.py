@@ -191,7 +191,7 @@ def table_sizes(
                pg_size_pretty(pg_total_relation_size(schemaname || '.' || relname)) AS total_size,
                pg_total_relation_size(schemaname || '.' || relname) AS total_size_bytes,
                pg_size_pretty(pg_relation_size(schemaname || '.' || relname)) AS data_size,
-               pg_size_pretty(pg_indexes_size(schemaname || '.' || relname::regclass)) AS index_size,
+               pg_size_pretty(pg_indexes_size((schemaname || '.' || relname)::regclass)) AS index_size,
                n_live_tup AS estimated_rows
         FROM pg_stat_user_tables
         {where}

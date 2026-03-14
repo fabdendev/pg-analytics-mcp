@@ -1,6 +1,6 @@
 [project]
 name = "pg-analytics-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP server for PostgreSQL analytics — schema discovery, data exploration, relationships, performance, data quality, multi-env support"
 license = {text = "MIT"}
 keywords = ["mcp", "postgresql", "analytics", "data-quality", "monitoring"]
