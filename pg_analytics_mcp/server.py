@@ -175,13 +175,14 @@ def table_sizes(
     env = resolve_env(env)
     limit = _clamp_agg(limit)
 
-    where = ""
+    where_parts = ["schemaname NOT LIKE 'pg_temp%%'"]
     params: list = []
     if schema:
         safe_ident(schema)
-        where = "WHERE schemaname = %s"
+        where_parts.append("schemaname = %s")
         params.append(schema)
 
+    where = "WHERE " + " AND ".join(where_parts)
     params.append(limit)
     return query(
         env,
