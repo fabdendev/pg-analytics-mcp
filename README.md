@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io/) server for **PostgreSQL analytics** �
 
 ## What it does
 
-Exposes **24 read-only tools** organised in 6 categories:
+Exposes **20 read-only tools** (+ 4 optional) organised in 6 categories:
 
 ### Schema Discovery
 - **`database_summary`** — high-level overview: schema/table/view/FK/index counts, total size, extensions
@@ -36,11 +36,13 @@ Exposes **24 read-only tools** organised in 6 categories:
 - **`null_report`** — null percentage for every column in a table
 - **`duplicate_check`** — find duplicate rows based on a set of columns
 
-### Pipeline Failures
-- **`pipeline_fail_tables`** — discover all `pipeline.*_fails` tables with row counts and stats
+### Fail Table Tracking (opt-in via `PG_FAIL_SCHEMA`)
+These 4 tools are only registered when `PG_FAIL_SCHEMA` is set. They discover `*_fails` tables in the specified schema that have `run_id`, `stage`, `comment`, `failed_at` columns.
+
+- **`pipeline_fail_tables`** — discover all `*_fails` tables with row counts and stats
 - **`pipeline_fail_summary`** — cross-entity failure summary grouped by entity, stage, or both
 - **`pipeline_fail_details`** — drill into a specific entity's fail table with optional filters
-- **`pipeline_fail_runs`** — analyse which pipeline runs generated the most failures
+- **`pipeline_fail_runs`** — analyse which runs generated the most failures
 
 ## Quick start
 
@@ -78,6 +80,7 @@ Set environment variables for each PostgreSQL environment (at least one is requi
 | `PG_PROD_URL` | PostgreSQL DSN for PROD | Optional |
 | `PG_INCLUDE_SCHEMAS` | Comma-separated allowlist of schemas to scan | Optional |
 | `PG_IGNORE_SCHEMAS` | Comma-separated schemas to skip (added to internal exclusions) | Optional |
+| `PG_FAIL_SCHEMA` | Schema containing `*_fails` tables — enables `pipeline_fail_*` tools | Optional |
 | `PG_READ_ONLY` | Reserved for future write tools (not yet used) | Optional |
 
 ```bash

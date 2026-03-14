@@ -58,6 +58,13 @@ EXCLUDED_SCHEMAS: set[str] = INTERNAL_SCHEMAS | (
 )
 
 
+# ── Fail table tracking (opt-in) ────────────────────────────────────────────
+# PG_FAIL_SCHEMA=pipeline → enables pipeline_fail_* tools for that schema
+# Tables must match *_fails and have columns: run_id, stage, comment, failed_at
+
+FAIL_SCHEMA: str | None = os.environ.get("PG_FAIL_SCHEMA", "").strip() or None
+
+
 def schema_filter(col: str = "table_schema") -> tuple[str, tuple]:
     """Return (sql_fragment, params) for WHERE clause filtering schemas.
 
