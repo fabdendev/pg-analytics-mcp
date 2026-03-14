@@ -5,22 +5,30 @@ schema discovery, data exploration, relationship mapping, performance
 analysis, and data quality checks on any PostgreSQL database.
 
 Environment variables:
-    PG_DEV_URL    — PostgreSQL DSN for DEV  (at least one URL required)
-    PG_STG_URL    — PostgreSQL DSN for STG  (optional)
-    PG_PROD_URL   — PostgreSQL DSN for PROD (optional)
-    PG_READ_ONLY  — reserved for future write tools (not yet used)
+    PG_LOCAL_URL       — PostgreSQL DSN for LOCAL (optional)
+    PG_DEV_URL         — PostgreSQL DSN for DEV   (at least one URL required)
+    PG_STG_URL         — PostgreSQL DSN for STG   (optional)
+    PG_PROD_URL        — PostgreSQL DSN for PROD  (optional)
+    PG_INCLUDE_SCHEMAS — comma-separated allowlist of schemas to scan (optional)
+    PG_IGNORE_SCHEMAS  — comma-separated schemas to skip (optional)
+    PG_READ_ONLY       — reserved for future write tools (not yet used)
 """
+
+import re
 
 from fastmcp import FastMCP
 
 from pg_analytics_mcp.db import (
     AVAILABLE_ENVS,
     DEFAULT_ENV,
+    EXCLUDED_SCHEMAS,
+    INCLUDE_SCHEMAS,
     INTERNAL_SCHEMAS,
     connect,
     query,
     resolve_env,
     safe_ident,
+    schema_filter,
 )
 
 # ── MCP server ───────────────────────────────────────────────────────────────
@@ -62,28 +70,55 @@ def _clamp_agg(limit: int) -> int:
 @mcp.tool()
 def database_summary(env: str = DEFAULT_ENV) -> dict:
     """Get a high-level overview of the database: schema count, table count,
-    view count, FK count, index count, total size, and installed extensions."""
-    env = resolve_env(env)
+    view count, FK count, index count, total size, and installed extensions.
 
-    summary = query(
+    Respects PG_INCLUDE_SCHEMAS / PG_IGNORE_SCHEMAS filtering.
+    """
+    env = resolve_env(env)
+    filt, filt_params = schema_filter("table_schema")
+    filt_s, filt_s_params = schema_filter("schemaname")
+
+    summary = {}
+
+    r = query(
         env,
-        """
-        SELECT
-            (SELECT count(DISTINCT table_schema) FROM information_schema.tables
-             WHERE table_schema NOT IN ('pg_catalog','information_schema')) AS schema_count,
-            (SELECT count(*) FROM information_schema.tables
-             WHERE table_type = 'BASE TABLE'
-               AND table_schema NOT IN ('pg_catalog','information_schema')) AS table_count,
-            (SELECT count(*) FROM information_schema.tables
-             WHERE table_type = 'VIEW'
-               AND table_schema NOT IN ('pg_catalog','information_schema')) AS view_count,
-            (SELECT count(*) FROM information_schema.table_constraints
-             WHERE constraint_type = 'FOREIGN KEY') AS fk_count,
-            (SELECT count(*) FROM pg_indexes
-             WHERE schemaname NOT IN ('pg_catalog','information_schema')) AS index_count,
-            (SELECT pg_size_pretty(pg_database_size(current_database()))) AS total_size
-    """,
-    )[0]
+        f"SELECT count(DISTINCT table_schema) AS v FROM information_schema.tables WHERE {filt}",
+        filt_params,
+    )
+    summary["schema_count"] = r[0]["v"]
+
+    r = query(
+        env,
+        f"SELECT count(*) AS v FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND {filt}",
+        filt_params,
+    )
+    summary["table_count"] = r[0]["v"]
+
+    r = query(
+        env,
+        f"SELECT count(*) AS v FROM information_schema.tables WHERE table_type = 'VIEW' AND {filt}",
+        filt_params,
+    )
+    summary["view_count"] = r[0]["v"]
+
+    r = query(
+        env,
+        "SELECT count(*) AS v FROM information_schema.table_constraints WHERE constraint_type = 'FOREIGN KEY'",
+    )
+    summary["fk_count"] = r[0]["v"]
+
+    r = query(
+        env,
+        f"SELECT count(*) AS v FROM pg_indexes WHERE {filt_s}",
+        filt_s_params,
+    )
+    summary["index_count"] = r[0]["v"]
+
+    r = query(
+        env,
+        "SELECT pg_size_pretty(pg_database_size(current_database())) AS v",
+    )
+    summary["total_size"] = r[0]["v"]
 
     extensions = query(
         env, "SELECT extname, extversion FROM pg_extension ORDER BY extname"
@@ -91,15 +126,19 @@ def database_summary(env: str = DEFAULT_ENV) -> dict:
     summary["extensions"] = [f"{e['extname']} {e['extversion']}" for e in extensions]
     summary["env"] = env
 
-    # Materialized views
-    mat_views = query(
+    r = query(
         env,
-        """
-        SELECT count(*) AS cnt FROM pg_matviews
-        WHERE schemaname NOT IN ('pg_catalog','information_schema')
-    """,
+        f"SELECT count(*) AS v FROM pg_matviews WHERE {filt_s}",
+        filt_s_params,
     )
-    summary["materialized_view_count"] = mat_views[0]["cnt"]
+    summary["materialized_view_count"] = r[0]["v"]
+
+    if INCLUDE_SCHEMAS:
+        summary["schema_filter"] = f"include: {', '.join(sorted(INCLUDE_SCHEMAS))}"
+    elif EXCLUDED_SCHEMAS - INTERNAL_SCHEMAS:
+        summary["schema_filter"] = (
+            f"ignore: {', '.join(sorted(EXCLUDED_SCHEMAS - INTERNAL_SCHEMAS))}"
+        )
 
     return summary
 
@@ -109,17 +148,18 @@ def scan_schemas(env: str = DEFAULT_ENV) -> list[dict]:
     """Scan all user schemas and return row counts for every table.
 
     Returns a list of {schema, table, row_count} sorted by schema and table name.
-    Skips internal PostgreSQL and TimescaleDB schemas.
+    Respects PG_INCLUDE_SCHEMAS / PG_IGNORE_SCHEMAS filtering.
     """
     env = resolve_env(env)
-    sql = """
+    filt, filt_params = schema_filter("table_schema")
+    sql = f"""
         SELECT table_schema AS schema, table_name AS tname
         FROM information_schema.tables
         WHERE table_type = 'BASE TABLE'
-          AND table_schema NOT IN %s
+          AND {filt}
         ORDER BY table_schema, table_name
     """
-    tables = query(env, sql, (tuple(INTERNAL_SCHEMAS),))
+    tables = query(env, sql, filt_params)
 
     results = []
     with connect(env) as conn:
@@ -215,16 +255,17 @@ def find_tables(pattern: str, env: str = DEFAULT_ENV) -> list[dict]:
     Example: find_tables('%price%') returns all tables with 'price' in the name.
     """
     env = resolve_env(env)
+    filt, filt_params = schema_filter("table_schema")
     return query(
         env,
-        """
+        f"""
         SELECT table_schema AS schema, table_name AS table, table_type
         FROM information_schema.tables
         WHERE table_name ILIKE %s
-          AND table_schema NOT IN ('pg_catalog', 'information_schema')
+          AND {filt}
         ORDER BY table_schema, table_name
     """,
-        (pattern,),
+        (pattern, *filt_params),
     )
 
 
@@ -235,17 +276,18 @@ def find_columns(column_pattern: str, env: str = DEFAULT_ENV) -> list[dict]:
     Example: find_columns('%email%') finds every table with an email-like column.
     """
     env = resolve_env(env)
+    filt, filt_params = schema_filter("table_schema")
     return query(
         env,
-        """
+        f"""
         SELECT table_schema AS schema, table_name AS table,
                column_name, data_type, is_nullable
         FROM information_schema.columns
         WHERE column_name ILIKE %s
-          AND table_schema NOT IN ('pg_catalog', 'information_schema')
+          AND {filt}
         ORDER BY table_schema, table_name, ordinal_position
     """,
-        (column_pattern,),
+        (column_pattern, *filt_params),
     )
 
 
@@ -551,8 +593,9 @@ def index_usage(
     """
     env = resolve_env(env)
 
-    where_parts = ["schemaname NOT IN ('pg_catalog', 'information_schema')"]
-    params: list = []
+    filt, filt_params = schema_filter("schemaname")
+    where_parts = [filt]
+    params: list = list(filt_params)
 
     if schema:
         safe_ident(schema)
@@ -788,6 +831,295 @@ def duplicate_check(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Pipeline Failures (v2) — Multi-table fail tracking
+# ═════════════════════════════════════════════════════════════════════════════
+
+_FAIL_TABLE_REQUIRED_COLS = {"run_id", "stage", "comment", "failed_at"}
+_UUID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
+
+
+def _validate_uuid(value: str) -> str:
+    """Validate UUID format, raise ValueError if invalid."""
+    if not _UUID_RE.match(value):
+        raise ValueError(f"Invalid UUID format: {value}")
+    return value
+
+
+def _clamp_days(days: int) -> int:
+    """Clamp days to 1-90 range."""
+    return max(1, min(days, 90))
+
+
+def _discover_fail_tables(env: str) -> list[dict]:
+    """Discover pipeline.*_fails tables with required metadata columns."""
+    rows = query(
+        env,
+        """
+        SELECT t.table_name
+        FROM information_schema.tables t
+        WHERE t.table_schema = 'pipeline'
+          AND t.table_name LIKE '%%\\_fails'
+          AND (SELECT COUNT(*) FROM information_schema.columns c
+               WHERE c.table_schema = t.table_schema
+                 AND c.table_name = t.table_name
+                 AND c.column_name IN ('run_id','stage','comment','failed_at')) = 4
+        ORDER BY t.table_name
+        """,
+    )
+    return [
+        {
+            "table": r["table_name"],
+            "entity": r["table_name"].removesuffix("_fails"),
+        }
+        for r in rows
+    ]
+
+
+@mcp.tool()
+def pipeline_fail_tables(env: str = DEFAULT_ENV) -> list[dict]:
+    """Discover all pipeline.*_fails tables and their stats.
+
+    Returns per table: entity, table, row_count, latest_failure, oldest_failure,
+    distinct_stages, distinct_runs.
+    """
+    env = resolve_env(env)
+    tables = _discover_fail_tables(env)
+    if not tables:
+        return [{"info": "No pipeline.*_fails tables found in this environment"}]
+
+    results = []
+    with connect(env) as conn:
+        with conn.cursor() as cur:
+            for t in tables:
+                tname = safe_ident(t["table"])
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) AS row_count,
+                           MAX(failed_at) AS latest_failure,
+                           MIN(failed_at) AS oldest_failure,
+                           COUNT(DISTINCT stage) AS distinct_stages,
+                           COUNT(DISTINCT run_id) AS distinct_runs
+                    FROM pipeline.{tname}
+                    """
+                )
+                row = cur.fetchone()
+                results.append(
+                    {
+                        "entity": t["entity"],
+                        "table": f"pipeline.{t['table']}",
+                        "row_count": row["row_count"],
+                        "latest_failure": str(row["latest_failure"])
+                        if row["latest_failure"]
+                        else None,
+                        "oldest_failure": str(row["oldest_failure"])
+                        if row["oldest_failure"]
+                        else None,
+                        "distinct_stages": row["distinct_stages"],
+                        "distinct_runs": row["distinct_runs"],
+                    }
+                )
+    return results
+
+
+@mcp.tool()
+def pipeline_fail_summary(
+    env: str = DEFAULT_ENV,
+    days: int = 7,
+    group_by: str = "entity",
+) -> list[dict]:
+    """Summarise pipeline failures across all *_fails tables.
+
+    Groups by 'entity', 'stage', or 'entity_stage'. Looks back `days` days (1-90).
+    """
+    env = resolve_env(env)
+    days = _clamp_days(days)
+
+    if group_by not in ("entity", "stage", "entity_stage"):
+        raise ValueError("group_by must be 'entity', 'stage', or 'entity_stage'")
+
+    tables = _discover_fail_tables(env)
+    if not tables:
+        return [{"info": "No pipeline.*_fails tables found in this environment"}]
+
+    unions = []
+    for t in tables:
+        tname = safe_ident(t["table"])
+        entity_literal = t["entity"].replace("'", "''")
+        unions.append(
+            f"SELECT '{entity_literal}' AS entity, stage, run_id, failed_at "
+            f"FROM pipeline.{tname} "
+            f"WHERE failed_at >= NOW() - INTERVAL '{days} days'"
+        )
+
+    union_sql = " UNION ALL ".join(unions)
+
+    if group_by == "entity":
+        select = "entity"
+        group = "entity"
+        order = "total_failures DESC"
+    elif group_by == "stage":
+        select = "stage"
+        group = "stage"
+        order = "total_failures DESC"
+    else:
+        select = "entity, stage"
+        group = "entity, stage"
+        order = "total_failures DESC"
+
+    sql = f"""
+        SELECT {select},
+               COUNT(*) AS total_failures,
+               COUNT(DISTINCT run_id) AS distinct_runs,
+               MIN(failed_at) AS earliest,
+               MAX(failed_at) AS latest
+        FROM ({union_sql}) sub
+        GROUP BY {group}
+        ORDER BY {order}
+        LIMIT 200
+    """
+    rows = query(env, sql)
+    for r in rows:
+        if r.get("earliest"):
+            r["earliest"] = str(r["earliest"])
+        if r.get("latest"):
+            r["latest"] = str(r["latest"])
+    return rows
+
+
+@mcp.tool()
+def pipeline_fail_details(
+    entity: str,
+    env: str = DEFAULT_ENV,
+    limit: int = 50,
+    stage: str | None = None,
+    run_id: str | None = None,
+    days: int | None = None,
+) -> list[dict]:
+    """Drill into failure details for a specific entity's fail table.
+
+    entity: e.g. 'invoices' (looks up pipeline.invoices_fails).
+    Optional filters: stage, run_id (UUID), days (time window).
+    """
+    env = resolve_env(env)
+    limit = _clamp_row(limit)
+
+    table_name = f"{entity}_fails"
+    safe_table = safe_ident(table_name)
+
+    # Verify table exists
+    exists = query(
+        env,
+        """
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'pipeline' AND table_name = %s
+        """,
+        (table_name,),
+    )
+    if not exists:
+        return [{"error": f"Table pipeline.{table_name} not found in this environment"}]
+
+    where_parts: list[str] = []
+    params: list = []
+
+    if stage:
+        where_parts.append("stage = %s")
+        params.append(stage)
+
+    if run_id:
+        _validate_uuid(run_id)
+        where_parts.append("run_id = %s")
+        params.append(run_id)
+
+    if days is not None:
+        days = _clamp_days(days)
+        where_parts.append(f"failed_at >= NOW() - INTERVAL '{days} days'")
+
+    where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    params.append(limit)
+
+    return query(
+        env,
+        f"SELECT * FROM pipeline.{safe_table} {where} ORDER BY failed_at DESC LIMIT %s",
+        params,
+    )
+
+
+@mcp.tool()
+def pipeline_fail_runs(
+    env: str = DEFAULT_ENV,
+    entity: str | None = None,
+    limit: int = 50,
+    days: int = 7,
+) -> list[dict]:
+    """Analyse which pipeline runs generated the most failures.
+
+    Optionally scope to a single entity. Looks back `days` days (1-90).
+    Returns: run_id, entities_affected, total_failures, stages, earliest_failure, latest_failure.
+    """
+    env = resolve_env(env)
+    limit = _clamp_agg(limit)
+    days = _clamp_days(days)
+
+    if entity:
+        table_name = f"{entity}_fails"
+        safe_table = safe_ident(table_name)
+        exists = query(
+            env,
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'pipeline' AND table_name = %s
+            """,
+            (table_name,),
+        )
+        if not exists:
+            return [{"error": f"Table pipeline.{table_name} not found"}]
+
+        entity_literal = entity.replace("'", "''")
+        unions = [
+            f"SELECT '{entity_literal}' AS entity, run_id, stage, failed_at "
+            f"FROM pipeline.{safe_table} "
+            f"WHERE failed_at >= NOW() - INTERVAL '{days} days'"
+        ]
+    else:
+        tables = _discover_fail_tables(env)
+        if not tables:
+            return [{"info": "No pipeline.*_fails tables found in this environment"}]
+        unions = []
+        for t in tables:
+            tname = safe_ident(t["table"])
+            entity_literal = t["entity"].replace("'", "''")
+            unions.append(
+                f"SELECT '{entity_literal}' AS entity, run_id, stage, failed_at "
+                f"FROM pipeline.{tname} "
+                f"WHERE failed_at >= NOW() - INTERVAL '{days} days'"
+            )
+
+    union_sql = " UNION ALL ".join(unions)
+
+    sql = f"""
+        SELECT run_id,
+               COUNT(DISTINCT entity) AS entities_affected,
+               COUNT(*) AS total_failures,
+               STRING_AGG(DISTINCT stage, ', ' ORDER BY stage) AS stages,
+               MIN(failed_at) AS earliest_failure,
+               MAX(failed_at) AS latest_failure
+        FROM ({union_sql}) sub
+        GROUP BY run_id
+        ORDER BY total_failures DESC
+        LIMIT %s
+    """
+    rows = query(env, sql, (limit,))
+    for r in rows:
+        if r.get("run_id"):
+            r["run_id"] = str(r["run_id"])
+        if r.get("earliest_failure"):
+            r["earliest_failure"] = str(r["earliest_failure"])
+        if r.get("latest_failure"):
+            r["latest_failure"] = str(r["latest_failure"])
+    return rows
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Legacy — Pipeline-specific tools (kept for backward compatibility)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -798,9 +1130,10 @@ def ingestion_failures(
     limit: int = 50,
     asset_name: str | None = None,
 ) -> list[dict]:
-    """Inspect recent ingestion failures from pipeline.ingestion_failures.
+    """Inspect recent ingestion failures from pipeline.ingestion_failures (legacy monolithic table).
 
     Optionally filter by asset_name. Returns the most recent failures first.
+    For newer per-entity fail tables, use pipeline_fail_* tools.
     """
     env = resolve_env(env)
     limit = _clamp_row(limit)
@@ -851,9 +1184,10 @@ def ingestion_failures(
 
 @mcp.tool()
 def ingestion_failures_summary(env: str = DEFAULT_ENV) -> list[dict]:
-    """Summarise ingestion failures grouped by asset/error type with counts.
+    """Summarise ingestion failures grouped by asset/error type with counts (legacy monolithic table).
 
     Useful for identifying which assets are failing most frequently.
+    For newer per-entity fail tables, use pipeline_fail_* tools.
     """
     env = resolve_env(env)
 

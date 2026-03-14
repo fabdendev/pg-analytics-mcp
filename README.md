@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io/) server for **PostgreSQL analytics** �
 
 ## What it does
 
-Exposes **22 read-only tools** organised in 6 categories:
+Exposes **26 read-only tools** organised in 7 categories:
 
 ### Schema Discovery
 - **`database_summary`** — high-level overview: schema/table/view/FK/index counts, total size, extensions
@@ -36,9 +36,15 @@ Exposes **22 read-only tools** organised in 6 categories:
 - **`null_report`** — null percentage for every column in a table
 - **`duplicate_check`** — find duplicate rows based on a set of columns
 
+### Pipeline Failures (v2)
+- **`pipeline_fail_tables`** — discover all `pipeline.*_fails` tables with row counts and stats
+- **`pipeline_fail_summary`** — cross-entity failure summary grouped by entity, stage, or both
+- **`pipeline_fail_details`** — drill into a specific entity's fail table with optional filters
+- **`pipeline_fail_runs`** — analyse which pipeline runs generated the most failures
+
 ### Legacy (pipeline-specific)
-- **`ingestion_failures`** — recent records from `pipeline.ingestion_failures`
-- **`ingestion_failures_summary`** — failures grouped by table + error reason
+- **`ingestion_failures`** — recent records from `pipeline.ingestion_failures` (legacy monolithic table)
+- **`ingestion_failures_summary`** — failures grouped by table + error reason (legacy monolithic table)
 
 ## Quick start
 
@@ -70,18 +76,26 @@ Set environment variables for each PostgreSQL environment (at least one is requi
 
 | Variable | Description | Required |
 |----------|-------------|----------|
+| `PG_LOCAL_URL` | PostgreSQL DSN for LOCAL | At least one URL |
 | `PG_DEV_URL` | PostgreSQL DSN for DEV | At least one URL |
 | `PG_STG_URL` | PostgreSQL DSN for STG | Optional |
 | `PG_PROD_URL` | PostgreSQL DSN for PROD | Optional |
+| `PG_INCLUDE_SCHEMAS` | Comma-separated allowlist of schemas to scan | Optional |
+| `PG_IGNORE_SCHEMAS` | Comma-separated schemas to skip (added to internal exclusions) | Optional |
 | `PG_READ_ONLY` | Reserved for future write tools (not yet used) | Optional |
 
 ```bash
 export PG_DEV_URL="postgresql://user:pass@host:5432/dbname"
 export PG_STG_URL="postgresql://user:pass@host:5432/dbname"   # optional
 export PG_PROD_URL="postgresql://user:pass@host:5432/dbname"  # optional
+
+# Schema filtering (optional — pick one, not both)
+export PG_INCLUDE_SCHEMAS="core,trading,pipeline"  # only scan these
+export PG_IGNORE_SCHEMAS="orion,shared"             # skip these
 ```
 
 Supports `postgresql+asyncpg://` URLs (the driver prefix is stripped automatically).
+If both `PG_INCLUDE_SCHEMAS` and `PG_IGNORE_SCHEMAS` are set, the include list takes precedence.
 
 ### Add to Claude Code
 
@@ -131,7 +145,7 @@ All tools are **read-only**. No data is ever modified. Additional safeguards:
 
 ## Multi-environment support
 
-Configure up to 3 environments (DEV, STG, PROD). The first configured environment becomes the default. Use `compare_envs` to quickly spot row count differences across environments.
+Configure up to 4 environments (LOCAL, DEV, STG, PROD). The first configured environment becomes the default. Use `compare_envs` to quickly spot row count differences across environments.
 
 ## Development
 

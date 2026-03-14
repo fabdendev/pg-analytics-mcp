@@ -16,6 +16,7 @@ import psycopg2.extras
 
 ENVS: dict[str, str] = {}
 for _env, _var in [
+    ("local", "PG_LOCAL_URL"),
     ("dev", "PG_DEV_URL"),
     ("stg", "PG_STG_URL"),
     ("prod", "PG_PROD_URL"),
@@ -26,7 +27,7 @@ for _env, _var in [
 
 if not ENVS:
     raise RuntimeError(
-        "No PostgreSQL URLs configured. Set PG_DEV_URL, PG_STG_URL, or PG_PROD_URL."
+        "No PostgreSQL URLs configured. Set PG_LOCAL_URL, PG_DEV_URL, PG_STG_URL, or PG_PROD_URL."
     )
 
 AVAILABLE_ENVS = list(ENVS.keys())
@@ -40,6 +41,34 @@ INTERNAL_SCHEMAS = {
     "pg_catalog",
     "information_schema",
 }
+
+# ── Schema filtering ────────────────────────────────────────────────────────
+# PG_INCLUDE_SCHEMAS=core,trading  → only scan these schemas (allowlist)
+# PG_IGNORE_SCHEMAS=orion,shared   → skip these schemas in addition to internal ones
+# If both set, PG_INCLUDE_SCHEMAS takes precedence.
+
+_include_raw = os.environ.get("PG_INCLUDE_SCHEMAS", "").strip()
+_ignore_raw = os.environ.get("PG_IGNORE_SCHEMAS", "").strip()
+
+INCLUDE_SCHEMAS: set[str] | None = (
+    {s.strip() for s in _include_raw.split(",") if s.strip()} if _include_raw else None
+)
+EXCLUDED_SCHEMAS: set[str] = INTERNAL_SCHEMAS | (
+    {s.strip() for s in _ignore_raw.split(",") if s.strip()} if _ignore_raw else set()
+)
+
+
+def schema_filter(col: str = "table_schema") -> tuple[str, tuple]:
+    """Return (sql_fragment, params) for WHERE clause filtering schemas.
+
+    If PG_INCLUDE_SCHEMAS is set, returns ``col IN %s``.
+    Otherwise returns ``col NOT IN %s`` using EXCLUDED_SCHEMAS.
+    """
+    safe_ident(col.split(".")[-1])  # validate identifier
+    if INCLUDE_SCHEMAS:
+        return f"{col} IN %s", (tuple(INCLUDE_SCHEMAS),)
+    return f"{col} NOT IN %s", (tuple(EXCLUDED_SCHEMAS),)
+
 
 # ── Identifier safety ────────────────────────────────────────────────────────
 
